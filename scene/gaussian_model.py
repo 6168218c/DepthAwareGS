@@ -20,6 +20,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.fft_utils import get_fft_kernel
+from gaussian_renderer import apply_weights, render
 
 class GaussianModel:
 
@@ -40,8 +42,7 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-
-    def __init__(self, sh_degree : int):
+    def __init__(self, sh_degree: int, anchor_loss_init: float = 1, anchor_loss_multiplier=1.2, hf_threshold=0.005):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
@@ -50,6 +51,13 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+
+        self.lifetime = torch.empty(0)
+        self.hf_weights = torch.empty(0)
+        self.hf_weights_count = torch.empty(0)
+        self.hf_threshold = hf_threshold
+        self.hf_downgrade_count = 0
+
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -57,6 +65,12 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+        self.anchor_loss_init = anchor_loss_init
+        self.anchor_loss_multiplier = anchor_loss_multiplier
+        self.anchor_loss_weight_max = 10.0
+        self.anchor_loss_schedule = torch.tensor([0, self.anchor_loss_init], device="cuda")
+        self.anchor = {}
 
     def capture(self):
         return (
@@ -67,6 +81,7 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
+            self.lifetime,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
@@ -75,18 +90,21 @@ class GaussianModel:
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale) = model_args
+        (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.lifetime,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+        ) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -144,6 +162,11 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+
+        self.lifetime = torch.zeros((self.get_xyz.shape[0]), dtype=torch.int64, device="cuda")
+        self.hf_weights = torch.zeros((self.get_xyz.shape[0]), dtype=torch.float, device="cuda")
+        self.hf_weights_count = torch.zeros((self.get_xyz.shape[0]), dtype=torch.int64, device="cuda")
+
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -253,6 +276,10 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
+        self.lifetime = torch.zeros((len(xyz)), dtype=torch.int64, device="cuda")
+        self.hf_weights = torch.zeros((len(xyz)), dtype=torch.float, device="cuda")
+        self.hf_weights_count = torch.zeros((len(xyz)), dtype=torch.int64, device="cuda")
+
         self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
@@ -299,6 +326,10 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
+        self.lifetime = self.lifetime[valid_points_mask]
+        self.hf_weights = self.hf_weights[valid_points_mask]
+        self.hf_weights_count = self.hf_weights_count[valid_points_mask]
+
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
@@ -341,6 +372,14 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+
+        self.lifetime = torch.cat([self.lifetime, torch.zeros((new_xyz.shape[0]), dtype=torch.int64, device="cuda")])
+        self.hf_weights = torch.cat(
+            [self.hf_weights, torch.zeros((new_xyz.shape[0]), dtype=torch.float32, device="cuda")]
+        )
+        self.hf_weights_count = torch.cat(
+            [self.hf_weights_count, torch.zeros((new_xyz.shape[0]), dtype=torch.float32, device="cuda")]
+        )
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -386,9 +425,23 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, max_densify_percent, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
+
+        if max_densify_percent < 1:
+            valid_percent = len(grads.nonzero()) * max_densify_percent / grads.shape[0]
+            thresold_value = torch.quantile(grads, 1 - valid_percent)
+            grads[grads < thresold_value] = 0.0
+
+        # update lifetime
+        self.update_anchor_loss_schedule()
+        self.lifetime += 1
+
+        # acquire hf weights
+        normalization_mask = self.hf_weights_count > 0
+        self.hf_weights[normalization_mask] /= self.hf_weights_count[normalization_mask]
+        self.hf_weights_count.zero_()
 
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
@@ -400,8 +453,77 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
+        self.update_anchors(self.hf_weights)
+        self.hf_weights.zero_()
+
         torch.cuda.empty_cache()
         
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    @torch.no_grad()
+    def _apply_weights(self, viewpoint_camera, image_weights, renderlike=False):
+        weights_package = apply_weights(viewpoint_camera, self, image_weights, renderlike)
+        return weights_package["weights"], weights_package["count"]
+
+    def add_high_frequency_stats(self, viewpoint_camera, image_weights):
+        weights, count = self._apply_weights(viewpoint_camera, image_weights)
+        self.hf_weights += weights.reshape(-1)
+        self.hf_weights_count += count
+
+    def update_anchor_loss_schedule(self):
+        self.anchor_loss_schedule = torch.cat(
+            (
+                self.anchor_loss_schedule,
+                torch.tensor(
+                    [min(self.anchor_loss_schedule[-1] * self.anchor_loss_multiplier, self.anchor_loss_weight_max)],
+                    device="cuda",
+                ),
+            )
+        )
+
+    def update_anchors(self, hf_weights):
+        features_rest = self._features_rest.detach().clone()
+        hf_filter = hf_weights > self.hf_threshold
+        self.hf_downgrade_count = hf_filter.sum().item()
+        features_rest[hf_filter] = 0.0  # downgrade to sh degree = 0
+        self.anchor = dict(
+            _xyz=self._xyz.detach().clone(),
+            _features_dc=self._features_dc.detach().clone(),
+            _features_rest=features_rest,
+            _scaling=self._scaling.detach().clone(),
+            _rotation=self._rotation.detach().clone(),
+            _opacity=self._opacity.detach().clone(),
+        )
+
+    def set_lifetimes_to_max(self):
+        self.lifetime[:] = self.lifetime.max()
+
+    def get_anchor_loss(self):
+        out = {"loss_anchor_color": 0, "loss_anchor_geo": 0, "loss_anchor_opacity": 0, "loss_anchor_scale": 0}
+
+        # if anchor is not recorded
+        if len(self.anchor) == 0:
+            return out
+
+        anchor_weight_list = torch.gather(self.anchor_loss_schedule, 0, self.lifetime)
+
+        for key, value in self.anchor.items():
+            delta = torch.nn.functional.mse_loss(getattr(self, key), value, reduction="none")
+            if "feature" in key:
+                delta *= anchor_weight_list[:, None, None]
+            else:
+                delta *= anchor_weight_list[:, None]
+            delta = torch.mean(delta)
+            if key in ["_xyz", "_rotation"]:
+                out["loss_anchor_geo"] += delta
+            elif key in ["_features_dc", "_features_rest"]:
+                out["loss_anchor_color"] += delta
+            elif key in ["_opacity"]:
+                out["loss_anchor_opacity"] += delta
+            elif key == "_scaling":
+                out["loss_anchor_scale"] += delta
+            else:
+                raise
+        return out

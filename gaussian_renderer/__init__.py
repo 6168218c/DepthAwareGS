@@ -11,24 +11,10 @@
 
 import torch
 import math
-from diff_gaussian_rasterization_depth_acc import GaussianRasterizationSettings, GaussianRasterizer
-from scene.gaussian_model import GaussianModel
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from utils.sh_utils import eval_sh
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
-    """
-    Render the scene. 
-    
-    Background tensor (bg_color) must be on GPU!
-    """
- 
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
-    try:
-        screenspace_points.retain_grad()
-    except:
-        pass
-
+def create_rasterizer(viewpoint_camera, active_sh_degree, debug, bg_color: torch.Tensor, scaling_modifier=1.0):
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
@@ -42,13 +28,31 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=pc.active_sh_degree,
+        sh_degree=active_sh_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=pipe.debug
+        debug=debug,
     )
-
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+    return rasterizer
+
+
+def render(viewpoint_camera, pc, pipe, bg_color: torch.Tensor, scaling_modifier=1.0, override_color=None):
+    """
+    Render the scene.
+
+    Background tensor (bg_color) must be on GPU!
+    """
+
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    try:
+        screenspace_points.retain_grad()
+    except:
+        pass
+
+    rasterizer = create_rasterizer(viewpoint_camera, pc.active_sh_degree, pipe.debug, bg_color, scaling_modifier)
 
     means3D = pc.get_xyz
     means2D = screenspace_points
@@ -83,21 +87,33 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     # rendered_image, radii, depth = rasterizer(
-    rendered_image, depth, acc, radii = rasterizer(
-        means3D = means3D,
-        means2D = means2D,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        opacities = opacity,
-        scales = scales,
-        rotations = rotations,
-        cov3D_precomp = cov3D_precomp)
+    rendered_image, radii, depth = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=shs,
+        colors_precomp=colors_precomp,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp,
+    )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {"render": rendered_image,
-            "viewspace_points": screenspace_points,
-            "visibility_filter" : radii > 0,
-            "radii": radii,
-            "depth": depth,
-            "acc": acc}
+    return {
+        "render": rendered_image,
+        "viewspace_points": screenspace_points,
+        "visibility_filter": radii > 0,
+        "radii": radii,
+        "depth": depth,
+    }
+
+
+def apply_weights(viewpoint_camera, pc, image_weights, renderlike=False):
+    rasterizer = create_rasterizer(viewpoint_camera, pc.active_sh_degree, False, torch.zeros(3).cuda(), 1.0)
+
+    weights, weights_cnt = rasterizer.apply_weights(
+        pc.get_xyz, None, pc.get_opacity, None, pc.get_scaling, pc.get_rotation, None, image_weights, renderlike
+    )
+
+    return {"weights": weights, "count": weights_cnt}

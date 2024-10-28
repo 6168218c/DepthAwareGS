@@ -77,12 +77,12 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
-        self.min_iters = 1500
+        self.iterations = 7000
+        self.min_iters = 2000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 30_000
+        self.position_lr_max_steps = 7000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
@@ -90,11 +90,21 @@ class OptimizationParams(ParamGroup):
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.densification_interval = 100
-        self.opacity_reset_interval = 3000
-        self.densify_from_iter = 100 #500
-        self.densify_until_iter = 15_000
+        self.opacity_reset_interval = 1000
+        self.densify_from_iter = 100  # 500
+        self.densify_until_iter = 6000
         self.densify_grad_threshold = 0.0002
-        self.random_background = False # At initial version we used, there was no random_background
+        self.random_depth_from_iter = 1000
+        self.lambda_projector_image_loss = 0.8
+        self.lambda_projector_depth_loss = 1.2
+        self.lambda_fft_smooth_loss = 0.2
+        self.fft_smooth_from_iter = 1000
+        self.anchor_min_iters = 1000
+        self.lambda_anchor_color = 5
+        self.lambda_anchor_geo = 50
+        self.lambda_anchor_opacity = 50
+        self.lambda_anchor_scale = 50
+        self.random_background = False
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
