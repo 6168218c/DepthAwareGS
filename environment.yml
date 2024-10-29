@@ -3,6 +3,7 @@ channels:
   - pytorch
   - conda-forge
   - defaults
+  - nvidia
 dependencies:
   - plyfile
   - python
