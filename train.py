@@ -170,8 +170,8 @@ def training(
 
             ### depth supervised loss
             depth = package["depth"]
-            deploss = 0
-            deploss_for_log = 0
+            deploss = torch.zeros(1, device=Ll1.device)
+            deploss_for_log = torch.zeros(1, device=Ll1.device)
             if usedepth and camera.original_depth is not None:
                 depth_threshold = 1
                 if apply_anchor_regularization and not ending_refinement:
