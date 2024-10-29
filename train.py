@@ -53,7 +53,9 @@ def training(
     checkpoint,
     debug_from,
     usedepth=False,
-    useProjector=False,
+    use_projector=False,
+    use_fft_smooth=False,
+    use_anchor_loss=False,
 ):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -78,7 +80,7 @@ def training(
     first_iter += 1
 
     train_cameras = scene.getTrainCameras()
-    if useProjector:
+    if use_projector:
         train_cameras = train_cameras
         projector_camera = train_cameras[-1]
     random_camera = RandomCamera(scene.getTrainCameras(), scene.world_center, scene.max_point_distance)
@@ -121,8 +123,6 @@ def training(
                 if not training:
                     torch.cuda.empty_cache()
                     time.sleep(1e-2)
-
-    depth_dropout_decay_func = get_expon_lr_func(0.5, 0.2, opt.random_depth_from_iter, 1, opt.iterations)
 
     for iteration in range(first_iter, opt.iterations + 1):
         render_webui()
@@ -193,7 +193,7 @@ def training(
 
         Ll1, Lssim, deploss, deploss_for_log = renderLosses(render_pkg, viewpoint_cam)
         loss = (1 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim
-        if useProjector and projector_camera == viewpoint_cam:
+        if use_projector and projector_camera == viewpoint_cam:
             loss = (
                 opt.lambda_projector_image_loss * ((1 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim)
                 + opt.lambda_projector_depth_loss * deploss
@@ -201,7 +201,7 @@ def training(
         else:
             loss = (1 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim + deploss
 
-        if iteration > opt.fft_smooth_from_iter:
+        if use_fft_smooth and iteration > opt.fft_smooth_from_iter:
             # regularization with randomized camera
             random_camera.randomize()
             render_pkg = render(random_camera, gaussians, pipe, bg)
@@ -259,24 +259,9 @@ def training(
                 torch.cuda.empty_cache()
 
             if iteration % 100 == 0:
-                if iteration > opt.anchor_min_iters and ema_depthloss_for_log > prev_depthloss:
-                    # training_report(
-                    #     tb_writer,
-                    #     iteration,
-                    #     Ll1,
-                    #     loss,
-                    #     l1_loss,
-                    #     iter_start.elapsed_time(iter_end),
-                    #     [iteration],
-                    #     scene,
-                    #     render,
-                    #     (pipe, background),
-                    #     txt_path=os.path.join(args.model_path, "metric.txt"),
-                    # )
-                    # scene.save(iteration)
-                    # print(f"!!! Stop Point: {iteration} !!!")
-                    # break
-                    if not apply_anchor_regularization:
+                # Enters anchor loss checking when depth overfits or not use depth
+                if iteration > opt.anchor_min_iters and (not usedepth or ema_depthloss_for_log > prev_depthloss):
+                    if use_anchor_loss and not apply_anchor_regularization:
                         print("[INFO] Hit depth overfitting bound, applying anchor regularization")
                         apply_anchor_regularization = True
                 else:
@@ -477,7 +462,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--depth", action="store_true")
-    parser.add_argument("--useProjector", action="store_true")
+    parser.add_argument("--use_projector", action="store_true")
+    parser.add_argument("--use_fft_smooth", action="store_true")
+    parser.add_argument("--use_anchor_loss", action="store_true")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -500,7 +487,9 @@ if __name__ == "__main__":
         args.start_checkpoint,
         args.debug_from,
         usedepth=args.depth,
-        useProjector=args.useProjector,
+        use_projector=args.use_projector,
+        use_fft_smooth=args.use_fft_smooth,
+        use_anchor_loss=args.use_anchor_loss,
     )
 
     # All done

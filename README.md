@@ -2,8 +2,8 @@
   
 ### :warning: Notice
 
-We have recognized that there was some errors in the implementation of depth rasterizer and are trying to fix it.  
-If you want to run the original code of our work, use the first commit of this repo and the first commit of the diff-rasterizer.
+This is a fork of original DRGS adding support for sparse depth map captured with structured light cameras. This repositry is heavily under construction.
+Original README below:
 
 # [CVPRW 2024] DRGS: Depth-Regularized Optimization for 3D Gaussian Splatting in Few-Shot Images
 ### [Jaeyoung Chung](https://robot0321.github.io/), [Jeongtaek Oh](https://taekkii.github.io/), [Kyoung Mu Lee](https://cv.snu.ac.kr/index.php/~kmlee/)
