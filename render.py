@@ -23,7 +23,7 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from scene import GaussianModel
-from webui import WebUI
+from webui import WebUI, Simple_Camera
 
 cmapper = matplotlib.cm.get_cmap('jet_r')
 
@@ -91,8 +91,44 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             np.save(os.path.join(gt_depth_path, view.image_name + ".npy"), gtdepthlist[idx])
 
 
+def render_interpolated(model_path, name, iteration, views, gaussians, pipeline, background):
+    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+    depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
+
+    makedirs(render_path, exist_ok=True)
+    makedirs(depth_path, exist_ok=True)
+
+    depthlist = []
+    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+        results = render(view, gaussians, pipeline, background)
+        rendering = results["render"]
+        torchvision.utils.save_image(rendering, os.path.join(render_path, "{0:05d}".format(idx) + ".png"))
+
+        if "depth" in results:
+            # depthlist.append((results["depth"]*(results["acc"]>0.9)).detach().cpu().numpy())
+            depthlist.append((results["depth"] * (results["depth"] != 0)).detach().cpu().numpy())
+    if "depth" in results:
+        for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+            colorized_depth = depth_colorize_with_mask(
+                np.array([depthlist[idx]]),
+                background.detach().cpu().numpy(),
+                dmindmax=[depthlist[idx].min(), depthlist[idx].max()],
+            )
+            imageio.imwrite(
+                os.path.join(depth_path, "{0:05d}".format(idx) + ".png"),
+                np.round(colorized_depth[0] * 255.0).astype(np.uint8),
+            )
+            np.save(os.path.join(depth_path, "{0:05d}".format(idx) + ".npy"), depthlist[idx])
+
+
 def render_sets(
-    dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, webui: bool
+    dataset: ModelParams,
+    iteration: int,
+    pipeline: PipelineParams,
+    skip_train: bool,
+    skip_test: bool,
+    webui: bool,
+    interpolate: bool,
 ):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
@@ -106,6 +142,35 @@ def render_sets(
 
         if not skip_test:
             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+
+        if interpolate:
+            orig_cameras = scene.getTrainCameras()
+            orig_cameras.append(orig_cameras[0])
+            interpolated_cameras = []
+            for i in range(len(orig_cameras) - 1):
+                interpolated_cameras.append(
+                    Simple_Camera(
+                        i,
+                        (orig_cameras[i].R + orig_cameras[i + 1].R) / 2,
+                        (orig_cameras[i].T + orig_cameras[i + 1].T) / 2,
+                        (orig_cameras[i].FoVx + orig_cameras[i + 1].FoVx) / 2,
+                        (orig_cameras[i].FoVy + orig_cameras[i + 1].FoVy) / 2,
+                        orig_cameras[0].image_height,
+                        orig_cameras[0].image_width,
+                        "",
+                        i,
+                    )
+                )
+
+            render_interpolated(
+                dataset.model_path,
+                "interpolated",
+                scene.loaded_iter,
+                interpolated_cameras,
+                gaussians,
+                pipeline,
+                background,
+            )
 
         if args.webui:
             webui = WebUI(scene)
@@ -122,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--webui", action="store_true")
+    parser.add_argument("--interpolate", action="store_true")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
@@ -129,5 +195,11 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     render_sets(
-        model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.webui
+        model.extract(args),
+        args.iteration,
+        pipeline.extract(args),
+        args.skip_train,
+        args.skip_test,
+        args.webui,
+        args.interpolate,
     )

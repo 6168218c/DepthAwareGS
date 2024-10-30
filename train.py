@@ -273,6 +273,7 @@ def training(
                 tb_writer,
                 iteration,
                 Ll1,
+                deploss_for_log,
                 loss,
                 l1_loss,
                 iter_start.elapsed_time(iter_end),
@@ -350,6 +351,7 @@ def training_report(
     tb_writer,
     iteration,
     Ll1,
+    deploss,
     loss,
     l1_loss,
     elapsed,
@@ -361,6 +363,7 @@ def training_report(
 ):
     if tb_writer:
         tb_writer.add_scalar("train_loss_patches/l1_loss", Ll1.item(), iteration)
+        tb_writer.add_scalar("train_loss_patches/dep_loss", deploss.item(), iteration)
         tb_writer.add_scalar("train_loss_patches/total_loss", loss.item(), iteration)
         tb_writer.add_scalar("iter_time", elapsed, iteration)
 
