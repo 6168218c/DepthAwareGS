@@ -12,14 +12,6 @@
 import os
 import sys
 import torch
-from pytorch3d.transforms.so3 import (
-    so3_exp_map,
-    so3_log_map,
-    so3_relative_angle,
-)
-from pytorch3d.renderer.cameras import (
-    SfMPerspectiveCameras,
-)
 from glob import glob
 from PIL import Image
 from typing import NamedTuple
@@ -405,92 +397,6 @@ def refineColmapWithIndex(path, train_index):
     os.makedirs(os.path.join(path, "plydummy"), exist_ok=True)
     ply_path = os.path.join(path, "plydummy", f"points3D_{int(datetime.now().timestamp())}.ply")  # k-shot train
     storePly(ply_path, xyz, rgb, xyzerr=err)
-
-    return ply_path, cam_extrinsics, cam_intrinsics
-
-
-def transformed_gtcams(gtcams, tarcam5):
-    gtcam5 = {}
-    gtcam5_R, gtcam5_T = [], []
-    tarcam5_R, tarcam5_T = [], []
-    for targetkey in tarcam5.keys():
-        tarcam5[targetkey].name
-        for gtkey in gtcams.keys():
-            if tarcam5[targetkey].name == gtcams[gtkey].name:
-                gtcam5[targetkey] = gtcams[gtkey]
-                gtcam5_R.append(qvec2rotmat(gtcam5[targetkey].qvec))
-                gtcam5_T.append(gtcam5[targetkey].tvec)
-
-                tarcam5_R.append(qvec2rotmat(tarcam5[targetkey].qvec))
-                tarcam5_T.append(tarcam5[targetkey].tvec)
-    gtcam5_R, gtcam5_T = torch.tensor(np.array(gtcam5_R)), torch.tensor(np.array(gtcam5_T))
-    tarcam5_R, tarcam5_T = torch.tensor(tarcam5_R), torch.tensor(tarcam5_T)
-
-    def get_relative_cam1cam2(cam_1, cam_2):
-        trans_rel = cam_1.inverse().compose(cam_2)
-        matrix_rel = trans_rel.get_matrix()
-        cams_relative = SfMPerspectiveCameras(R=matrix_rel[:, :3, :3], T=matrix_rel[:, 3, :3])
-        return cams_relative
-
-    tar_gt_rel0 = get_relative_cam1cam2(
-        SfMPerspectiveCameras(R=tarcam5_R, T=tarcam5_T).get_world_to_view_transform(),
-        SfMPerspectiveCameras(R=gtcam5_R, T=gtcam5_T).get_world_to_view_transform(),
-    )
-
-    targtrel_R = so3_exp_map(so3_log_map(tar_gt_rel0.R).mean(dim=0, keepdim=True)).clone().detach()
-    targtrel_T = tar_gt_rel0.T.mean(dim=0, keepdim=True).clone().detach()
-
-    R = torch.matmul(tarcam5_R, targtrel_R.double())
-    T = tarcam5_T + targtrel_T.double()
-
-    ### update
-    for idx, targetkey in enumerate(tarcam5.keys()):
-        tarcam5[targetkey].name
-        for gtkey in gtcams.keys():
-            if tarcam5[targetkey].name == gtcams[gtkey].name:
-                gtcams[gtkey]._replace(qvec=rotmat2qvec(R[idx].numpy()), tvec=T[idx].numpy())
-
-    return gtcams, targtrel_R, targtrel_T
-
-
-def BundleAdjustment_ColmapWithIndex(path, train_index):
-    """result
-    path: tmp_fewshot
-    'cam_extrinsics' and 'point3D.ply' contains the points observed in (at least 2) train-views
-    """
-    try:
-        tmp_fd = "tmp_fewshot" + str(int(datetime.now().timestamp()))
-
-        os.makedirs(os.path.join(path, tmp_fd, "images"), exist_ok=True)  #
-        for idx in train_index:
-            imgs1 = os.path.join(path, "images", f"{idx:05d}.jpg")
-            imgs2 = os.path.join(path, tmp_fd, "images", f"{idx:05d}.jpg")
-            os.system(f"cp {imgs1} {imgs2}")
-
-        os.system(
-            f"colmap automatic_reconstructor --workspace_path {os.path.join(path, tmp_fd)} --image_path {os.path.join(path, tmp_fd, 'images')} --camera_model PINHOLE --single_camera 1 --dense 0 --num_threads 8"
-        )  #
-
-        cam_extrinsics = read_extrinsics_binary(os.path.join(path, "sparse/0", "images.bin"))
-        tarcam5 = read_extrinsics_binary(os.path.join(path, tmp_fd, "sparse/0", "images.bin"))
-
-        cam_extrinsics, targtrel_R, targtrel_T = transformed_gtcams(cam_extrinsics, tarcam5)
-
-        xyz, rgb, err = read_points3D_binary(os.path.join(path, tmp_fd, "sparse/0/points3D.bin"))
-        xyz = (torch.tensor(xyz).float() @ targtrel_R[0] + targtrel_T[0]).numpy()
-
-        ### save in ply format
-        os.makedirs(os.path.join(path, "plydummy"), exist_ok=True)
-        ply_path = os.path.join(path, "plydummy", f"points3D_{int(datetime.now().timestamp())}.ply")  # k-shot train
-        storePly(ply_path, xyz, rgb, xyzerr=err)
-
-        os.system(f"rm -r {os.path.join(path, tmp_fd)}")  #
-
-    except:
-        os.system(f"rm -r {os.path.join(path, tmp_fd)}")  #
-        raise ("CANNOT RUN COLMAP!!")
-
-    cam_intrinsics = read_intrinsics_binary(os.path.join(path, "sparse/0", "cameras.bin"))
 
     return ply_path, cam_extrinsics, cam_intrinsics
 

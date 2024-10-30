@@ -97,7 +97,7 @@ class OptimizationParams(ParamGroup):
         self.random_depth_from_iter = 1000
         self.lambda_projector_image_loss = 0.8
         self.lambda_projector_depth_loss = 1.2
-        self.lambda_fft_smooth_loss = 0.2
+        self.lambda_fft_smooth_loss = 0.1
         self.fft_smooth_from_iter = 1000
         self.anchor_min_iters = 1000
         self.lambda_anchor_color = 5

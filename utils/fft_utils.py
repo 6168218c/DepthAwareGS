@@ -11,7 +11,7 @@ def get_fft_kernel(camera, channels=3, device="cuda"):
     w = camera.image_width
     h = camera.image_height
 
-    R = (h + w) // 12
+    R = (h + w) // 8
     if not key in _kernel_cache:
         hf_kernel = np.ones((h, w, channels), dtype=np.float32)
 

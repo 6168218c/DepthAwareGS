@@ -14,6 +14,8 @@ dependencies:
   - pytorch-cuda=12.1
   - tqdm
   - opencv
+  - matplotlib
+  - imageio
   - pip:
     - viser
     - submodules/diff-gaussian-rasterization-depth

@@ -175,7 +175,7 @@ def training(
             if usedepth and camera.original_depth is not None:
                 depth_threshold = 1
                 if apply_anchor_regularization and not ending_refinement:
-                    depth_threshold = 1
+                    depth_threshold = 0.2
 
                 depth_mask = camera.original_depth > 0  # render_pkg["acc"][0]
                 gt_maskeddepth = (camera.original_depth * depth_mask).cuda()
@@ -225,8 +225,6 @@ def training(
 
             image_weights = image_weights.sum(dim=0, keepdim=True)
             gaussians.add_high_frequency_stats(random_camera, image_weights)
-
-            loss = loss + opt.lambda_fft_smooth_loss * l2_loss(image_weights, torch.zeros_like(image_weights))
 
         if apply_anchor_regularization:
             lambda_ending_refinement_anchor = 1.2 if ending_refinement else 1
